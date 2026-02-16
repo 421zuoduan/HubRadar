@@ -1,53 +1,56 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-This repository hosts **HubRadar**, an Android-focused Expo app (React Native + TypeScript + NativeWind).
-Use this layout after initialization:
-- `app/`: Expo Router screens (entry routes such as `index.tsx`, `dashboard.tsx`).
-- `src/components/`: reusable UI components.
-- `src/features/`: domain modules (`location`, `hub-search`, `commute`).
-- `src/config/`: environment/config loaders.
-- `src/platform/android/`: Android-specific logic (e.g., `BackHandler`).
-- `assets/`: icons, images, fonts.
-- `__tests__/` or `src/**/__tests__/`: unit/integration tests.
+HubRadar is an Android-first Expo app (React Native + TypeScript + NativeWind).
+Current key paths:
+- `App.tsx`: main screen, orchestration, settings modal, detail modal.
+- `src/features/hub-search/services/amap.ts`: nearby hub discovery (subway/train/airport).
+- `src/features/commute/services/amapDirection.ts`: active/transit/driving commute data.
+- `src/features/location/services/amapInputTips.ts`: address suggestions.
+- `src/features/location/services/amapRegeo.ts`: reverse geocoding and city context.
+- `src/features/insight/services/scoring.ts`: accessibility scoring + smart hint.
+- `src/features/history/services/queryHistory.ts`: local query history.
+- `assets/`: app icons/splash images.
 
-Keep feature logic close to its module; avoid cross-feature imports except through typed service interfaces.
+Keep feature logic inside `src/features/*`; avoid mixing API parsing logic into UI components.
 
 ## Build, Test, and Development Commands
-Run from repository root:
+Run from repo root:
 - `npm install`: install dependencies.
-- `npx expo start --tunnel`: start dev server for real-device testing (recommended).
-- `npx expo start --android`: launch on Android emulator/device if available.
-- `npm run lint`: run lint checks.
-- `npm test`: run test suite.
-- `npx eas build -p android --profile preview`: generate installable Android preview build.
+- `npm run start -- --tunnel -c --port 8106`: start dev server for real device testing.
+- `npm run android`: run on Android target.
+- `npm run web`: run web preview.
+- `npx tsc --noEmit`: type-check before PR.
 
-If scripts are missing, add them to `package.json` before opening a PR.
+If you add new tooling (lint/test), add matching scripts to `package.json`.
 
 ## Coding Style & Naming Conventions
-- Language: TypeScript (`.ts`/`.tsx`), 2-space indentation.
-- Components: `PascalCase` filenames (e.g., `CommuteCard.tsx`).
-- Hooks/utilities: `camelCase` (e.g., `useCurrentLocation.ts`).
-- Prefer functional components and explicit return types for exported APIs.
-- Use NativeWind class utilities for styling; keep inline style objects minimal.
-- Enforce style with ESLint + Prettier.
+- TypeScript only (`.ts` / `.tsx`), 2-space indentation.
+- Components/types: `PascalCase`; helpers/hooks/functions: `camelCase`.
+- Keep API response mapping explicit and defensive (null checks, parsing guards).
+- Prefer small, focused service functions over large multi-purpose modules.
+- Use NativeWind classes for UI; keep inline styles minimal.
 
 ## Testing Guidelines
-- Preferred stack: Jest + React Native Testing Library.
-- Test files: `*.test.ts` / `*.test.tsx`.
-- Cover core flows: location permission, nearest hub lookup, commute ranking fallback (`transit` -> `driving`).
-- Add regression tests for bug fixes.
+- Baseline gate: `npx tsc --noEmit` must pass.
+- Manual verification required for:
+  - location permission flow,
+  - custom address suggestions,
+  - route results across active/transit/driving,
+  - settings (planned departure + wheel picker),
+  - detail modal expansion and history reuse.
 
 ## Commit & Pull Request Guidelines
-- Follow Conventional Commits: `feat:`, `fix:`, `chore:`, `docs:`, `test:`.
-- Keep commits small and scoped to one concern.
-- PRs must include:
-  - purpose and summary of changes,
-  - linked issue/task,
-  - test evidence (command output),
-  - screenshots/video for UI changes on Android.
+- Use Conventional Commits (`feat:`, `fix:`, `docs:`, `chore:`, `test:`).
+- Keep each commit scoped to one intent.
+- PR should include:
+  - behavior summary,
+  - affected files/modules,
+  - test evidence (commands + result),
+  - Android screenshots for UI changes.
 
 ## Security & Configuration Tips
-- Do not hardcode API keys.
-- Store client-safe values in `.env` via `EXPO_PUBLIC_*`.
-- Route sensitive map API calls through a backend proxy before production release.
+- Never hardcode API keys.
+- Use `.env` with `EXPO_PUBLIC_*`; keep `.env` out of version control.
+- Provide `.env.example` updates when adding new config keys.
+- For production release, route sensitive map requests through a backend proxy.

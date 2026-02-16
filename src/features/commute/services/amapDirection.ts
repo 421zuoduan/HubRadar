@@ -6,7 +6,10 @@ export type CommuteInfo = {
   walkingMinutes: number | null;
   cyclingMinutes: number | null;
   transitMinutes: number | null;
+  transitTransferCount: number | null;
+  transitArrivalTime: string | null;
   drivingMinutes: number | null;
+  drivingArrivalTime: string | null;
   transitSteps: string[];
 };
 
@@ -45,6 +48,50 @@ const toMinutes = (durationSeconds?: string): number | null => {
     return null;
   }
   return Math.max(1, Math.round(value / 60));
+};
+
+const toArrivalTime = (minutes: number | null): string | null => {
+  if (minutes == null) {
+    return null;
+  }
+  const now = new Date();
+  const eta = new Date(now.getTime() + minutes * 60 * 1000);
+  const hh = String(eta.getHours()).padStart(2, '0');
+  const mm = String(eta.getMinutes()).padStart(2, '0');
+  return `${hh}:${mm}`;
+};
+
+const parseDeparture = (departureTime: string | null | undefined): Date | null => {
+  if (!departureTime) {
+    return null;
+  }
+  const parsed = new Date(departureTime.replace(' ', 'T') + ':00');
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+};
+
+const activeModeFactorByTime = (departureTime: string | null | undefined): number => {
+  const date = parseDeparture(departureTime);
+  if (!date) {
+    return 1;
+  }
+  const hour = date.getHours();
+  if ((hour >= 7 && hour < 10) || (hour >= 17 && hour < 20)) {
+    return 1.12;
+  }
+  if (hour >= 22 || hour < 6) {
+    return 0.95;
+  }
+  return 1.03;
+};
+
+const applyActiveTimeFactor = (
+  minutes: number | null,
+  departureTime: string | null | undefined,
+): number | null => {
+  if (minutes == null) {
+    return null;
+  }
+  return Math.max(1, Math.round(minutes * activeModeFactorByTime(departureTime)));
 };
 
 const amapGetJson = async (url: URL): Promise<any> => {
@@ -93,6 +140,9 @@ const formatDurationLabel = (minutes: number | null): string => {
   }
   return `${hours}h ${mins}min`;
 };
+
+const isRateLimitError = (error: unknown): boolean =>
+  error instanceof AmapApiError && error.code === '10021';
 
 const parseTransitSteps = (segments: TransitSegment[] | undefined): string[] => {
   if (!segments?.length) {
@@ -143,47 +193,90 @@ export async function fetchCommuteInfo(params: {
   const origin = `${originLng},${originLat}`;
   const destination = `${destLng},${destLat}`;
 
-  const walkingUrl = new URL('https://restapi.amap.com/v3/direction/walking');
-  walkingUrl.search = new URLSearchParams({ key, origin, destination }).toString();
-  const walkingJson = await amapGetJson(walkingUrl);
-  const walkingMinutes = toMinutes(walkingJson?.route?.paths?.[0]?.duration);
+  let walkingMinutes: number | null = null;
+  let cyclingMinutes: number | null = null;
+  let transitMinutes: number | null = null;
+  let transitTransferCount: number | null = null;
+  let transitSteps: string[] = [];
+  let drivingMinutes: number | null = null;
 
-  const cyclingUrl = new URL('https://restapi.amap.com/v4/direction/bicycling');
-  cyclingUrl.search = new URLSearchParams({ key, origin, destination }).toString();
-  const cyclingJson = await amapGetCyclingJson(cyclingUrl);
-  const cyclingMinutes = toMinutes(cyclingJson?.data?.paths?.[0]?.duration);
-
-  const transitUrl = new URL('https://restapi.amap.com/v3/direction/transit/integrated');
-  const transitParams = new URLSearchParams({
-    key,
-    origin,
-    destination,
-    strategy: '0',
-    nightflag: '1',
-  });
-  if (departureTime) {
-    const [date, time] = departureTime.split(' ');
-    if (date && time) {
-      transitParams.set('date', date);
-      transitParams.set('time', time);
+  try {
+    const walkingUrl = new URL('https://restapi.amap.com/v3/direction/walking');
+    walkingUrl.search = new URLSearchParams({ key, origin, destination }).toString();
+    const walkingJson = await amapGetJson(walkingUrl);
+    walkingMinutes = applyActiveTimeFactor(
+      toMinutes(walkingJson?.route?.paths?.[0]?.duration),
+      departureTime,
+    );
+  } catch (error) {
+    if (isRateLimitError(error)) {
+      throw error;
     }
   }
-  transitUrl.search = transitParams.toString();
-  const transitJson = await amapGetJson(transitUrl);
-  const transit = transitJson?.route?.transits?.[0];
-  const transitMinutes = toMinutes(transit?.duration);
-  const transitSteps = parseTransitSteps(transit?.segments);
 
-  const drivingUrl = new URL('https://restapi.amap.com/v3/direction/driving');
-  drivingUrl.search = new URLSearchParams({
-    key,
-    origin,
-    destination,
-    strategy: '0',
-    extensions: 'base',
-  }).toString();
-  const drivingJson = await amapGetJson(drivingUrl);
-  const drivingMinutes = toMinutes(drivingJson?.route?.paths?.[0]?.duration);
+  try {
+    const cyclingUrl = new URL('https://restapi.amap.com/v4/direction/bicycling');
+    cyclingUrl.search = new URLSearchParams({ key, origin, destination }).toString();
+    const cyclingJson = await amapGetCyclingJson(cyclingUrl);
+    cyclingMinutes = applyActiveTimeFactor(
+      toMinutes(cyclingJson?.data?.paths?.[0]?.duration),
+      departureTime,
+    );
+  } catch (error) {
+    if (isRateLimitError(error)) {
+      throw error;
+    }
+  }
+
+  try {
+    const transitUrl = new URL('https://restapi.amap.com/v3/direction/transit/integrated');
+    const transitParams = new URLSearchParams({
+      key,
+      origin,
+      destination,
+      strategy: '0',
+      nightflag: '1',
+    });
+    if (departureTime) {
+      const [date, time] = departureTime.split(' ');
+      if (date && time) {
+        transitParams.set('date', date);
+        transitParams.set('time', time);
+      }
+    }
+    transitUrl.search = transitParams.toString();
+    const transitJson = await amapGetJson(transitUrl);
+    const transit = transitJson?.route?.transits?.[0];
+    transitMinutes = toMinutes(transit?.duration);
+    transitTransferCount =
+      transit?.segments?.filter((segment: TransitSegment) => (segment.bus?.buslines?.length ?? 0) > 0).length ?? null;
+    transitSteps = parseTransitSteps(transit?.segments);
+  } catch (error) {
+    if (isRateLimitError(error)) {
+      throw error;
+    }
+  }
+
+  try {
+    const drivingUrl = new URL('https://restapi.amap.com/v3/direction/driving');
+    const drivingParams = new URLSearchParams({
+      key,
+      origin,
+      destination,
+      strategy: '0',
+      extensions: 'base',
+    });
+    if (departureTime) {
+      drivingParams.set('departure_time', departureTime);
+    }
+    drivingUrl.search = drivingParams.toString();
+    const drivingJson = await amapGetJson(drivingUrl);
+    drivingMinutes = toMinutes(drivingJson?.route?.paths?.[0]?.duration);
+  } catch (error) {
+    if (isRateLimitError(error)) {
+      throw error;
+    }
+  }
 
   let activeMode: 'walking' | 'cycling' | null = null;
   let activeMinutes: number | null = null;
@@ -201,7 +294,10 @@ export async function fetchCommuteInfo(params: {
     walkingMinutes,
     cyclingMinutes,
     transitMinutes,
+    transitTransferCount,
+    transitArrivalTime: toArrivalTime(transitMinutes),
     drivingMinutes,
+    drivingArrivalTime: toArrivalTime(drivingMinutes),
     transitSteps,
   };
 }

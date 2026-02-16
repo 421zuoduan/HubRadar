@@ -16,7 +16,18 @@ type RawTip = {
   location?: string;
 };
 
+type RawPoi = {
+  id?: string;
+  name?: string;
+  address?: string;
+  pname?: string;
+  cityname?: string;
+  adname?: string;
+  location?: string;
+};
+
 const INPUT_TIPS_URL = 'https://restapi.amap.com/v3/assistant/inputtips';
+const TEXT_SEARCH_URL = 'https://restapi.amap.com/v3/place/text';
 
 const parseLocation = (location?: string): { longitude: number; latitude: number } | null => {
   if (!location) {
@@ -43,33 +54,33 @@ export async function fetchAddressSuggestions(params: {
     return [];
   }
 
-  const url = new URL(INPUT_TIPS_URL);
-  url.search = new URLSearchParams({
+  const tipUrl = new URL(INPUT_TIPS_URL);
+  tipUrl.search = new URLSearchParams({
     key,
     keywords: trimmed,
     city: city ?? '',
-    citylimit: 'false',
+    citylimit: city ? 'true' : 'false',
     datatype: 'all',
   }).toString();
 
-  const response = await fetch(url.toString());
-  if (!response.ok) {
-    throw new AmapApiError(`高德请求失败: ${response.status}`);
+  const tipResponse = await fetch(tipUrl.toString());
+  if (!tipResponse.ok) {
+    throw new AmapApiError(`高德请求失败: ${tipResponse.status}`);
   }
-  const json = (await response.json()) as {
+  const tipJson = (await tipResponse.json()) as {
     status?: string;
     infocode?: string;
     info?: string;
     tips?: RawTip[];
   };
-  if (json.status !== '1') {
+  if (tipJson.status !== '1') {
     throw new AmapApiError(
-      `高德接口错误: ${json.info ?? 'unknown'} (${json.infocode ?? 'n/a'})`,
-      json.infocode,
+      `高德接口错误: ${tipJson.info ?? 'unknown'} (${tipJson.infocode ?? 'n/a'})`,
+      tipJson.infocode,
     );
   }
 
-  return (json.tips ?? [])
+  const tipList = (tipJson.tips ?? [])
     .map((tip) => {
       const point = parseLocation(tip.location);
       if (!point || !tip.name) {
@@ -84,6 +95,61 @@ export async function fetchAddressSuggestions(params: {
         longitude: point.longitude,
       } satisfies AddressSuggestion;
     })
-    .filter((item): item is AddressSuggestion => Boolean(item))
-    .slice(0, limit);
+    .filter((item): item is AddressSuggestion => Boolean(item));
+
+  let poiList: AddressSuggestion[] = [];
+  if (tipList.length < limit) {
+    const textUrl = new URL(TEXT_SEARCH_URL);
+    textUrl.search = new URLSearchParams({
+      key,
+      keywords: trimmed,
+      city: city ?? '',
+      citylimit: city ? 'true' : 'false',
+      offset: String(Math.min(20, limit * 2)),
+      page: '1',
+      extensions: 'base',
+    }).toString();
+
+    const textResponse = await fetch(textUrl.toString());
+    if (textResponse.ok) {
+      const textJson = (await textResponse.json()) as {
+        status?: string;
+        pois?: RawPoi[];
+      };
+      if (textJson.status === '1') {
+        poiList = (textJson.pois ?? [])
+          .map((poi) => {
+            const point = parseLocation(poi.location);
+            if (!point || !poi.name) {
+              return null;
+            }
+            const address = [poi.pname, poi.cityname, poi.adname, poi.address].filter(Boolean).join(' ');
+            return {
+              id: poi.id ?? `${poi.name}-${poi.location}`,
+              name: poi.name,
+              address: address || '未知地址',
+              latitude: point.latitude,
+              longitude: point.longitude,
+            } satisfies AddressSuggestion;
+          })
+          .filter((item): item is AddressSuggestion => Boolean(item));
+      }
+    }
+  }
+
+  const merged = [...tipList, ...poiList];
+  const deduped: AddressSuggestion[] = [];
+  const seen = new Set<string>();
+  for (const item of merged) {
+    const keyOfItem = `${item.name}|${item.latitude.toFixed(6)}|${item.longitude.toFixed(6)}`;
+    if (seen.has(keyOfItem)) {
+      continue;
+    }
+    seen.add(keyOfItem);
+    deduped.push(item);
+    if (deduped.length >= limit) {
+      break;
+    }
+  }
+  return deduped;
 }

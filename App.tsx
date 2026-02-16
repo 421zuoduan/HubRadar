@@ -2,14 +2,15 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
+  Image,
   Modal,
   Pressable,
   ScrollView,
   Text,
   TextInput,
   View,
-  type NativeSyntheticEvent,
   type NativeScrollEvent,
+  type NativeSyntheticEvent,
 } from 'react-native';
 import DateTimePicker, { type DateTimePickerEvent } from '@react-native-community/datetimepicker';
 import * as Location from 'expo-location';
@@ -19,10 +20,35 @@ import {
   fetchAddressSuggestions,
   type AddressSuggestion,
 } from './src/features/location/services/amapInputTips';
+import {
+  loadQueryHistory,
+  saveQueryHistoryItem,
+  type QueryHistoryItem,
+} from './src/features/history/services/queryHistory';
+import { reverseGeocode } from './src/features/location/services/amapRegeo';
+import {
+  buildSmartHint,
+  resolveCityStrategy,
+  scoreHub,
+  type CityStrategy,
+} from './src/features/insight/services/scoring';
 
 type SimpleCoords = {
   latitude: number;
   longitude: number;
+};
+
+type CompareSlot = {
+  id: string;
+  label: string;
+  departure: string | null;
+};
+
+type CompareSlotResult = {
+  label: string;
+  activeMinutes: number | null;
+  transitMinutes: number | null;
+  drivingMinutes: number | null;
 };
 
 const WHEEL_ITEM_HEIGHT = 40;
@@ -88,6 +114,46 @@ const resolveActiveModeLabel = (
   return actual === 'walking' ? '步行(回退)' : '骑行(回退)';
 };
 
+const buildFallbackCommute = (): CommuteInfo => ({
+  activeMode: null,
+  activeMinutes: null,
+  walkingMinutes: null,
+  cyclingMinutes: null,
+  transitMinutes: null,
+  transitTransferCount: null,
+  transitArrivalTime: null,
+  drivingMinutes: null,
+  drivingArrivalTime: null,
+  transitSteps: [],
+});
+
+const buildCompareSlots = (): CompareSlot[] => {
+  const now = new Date();
+  const tomorrow = new Date(now);
+  tomorrow.setDate(now.getDate() + 1);
+
+  const morning = new Date(now);
+  morning.setHours(8, 30, 0, 0);
+  const morningLabel = now.getHours() < 8 ? '今天 08:30' : '明天 08:30';
+  if (now.getHours() >= 8) {
+    morning.setDate(now.getDate() + 1);
+  }
+
+  const evening = new Date(now);
+  evening.setHours(18, 30, 0, 0);
+  const eveningLabel = now.getHours() < 18 ? '今天 18:30' : '明天 18:30';
+  if (now.getHours() >= 18) {
+    evening.setDate(now.getDate() + 1);
+  }
+
+  return [
+    { id: 'now', label: '现在', departure: null },
+    { id: 'morning', label: morningLabel, departure: formatDateTimeForApi(morning) },
+    { id: 'evening', label: eveningLabel, departure: formatDateTimeForApi(evening) },
+    { id: 'tomorrow', label: '明天同一时刻', departure: formatDateTimeForApi(tomorrow) },
+  ];
+};
+
 function CyclicNumberWheel(props: {
   value: number;
   maxExclusive: number;
@@ -127,6 +193,7 @@ function CyclicNumberWheel(props: {
         showsVerticalScrollIndicator={false}
         snapToInterval={WHEEL_ITEM_HEIGHT}
         decelerationRate="fast"
+        nestedScrollEnabled
         getItemLayout={(_, index) => ({
           length: WHEEL_ITEM_HEIGHT,
           offset: WHEEL_ITEM_HEIGHT * index,
@@ -134,6 +201,7 @@ function CyclicNumberWheel(props: {
         })}
         initialNumToRender={12}
         onMomentumScrollEnd={onMomentumScrollEnd}
+        style={{ height: WHEEL_ITEM_HEIGHT * 5 }}
         renderItem={({ item }) => (
           <View style={{ height: WHEEL_ITEM_HEIGHT }} className="items-center justify-center">
             <Text className="text-lg text-slate-900">{pad2(item)}</Text>
@@ -148,16 +216,28 @@ export default function App() {
   const [statusText, setStatusText] = useState('等待定位与查询');
   const [hubs, setHubs] = useState<HubResult[]>([]);
   const [commuteByKind, setCommuteByKind] = useState<Record<string, CommuteInfo>>({});
+  const [scoreByKind, setScoreByKind] = useState<Record<string, number>>({});
   const [expandedKind, setExpandedKind] = useState<string | null>(null);
+  const [smartHint, setSmartHint] = useState('智能建议：等待首次查询。');
   const [isLoading, setIsLoading] = useState(false);
 
   const [originMode, setOriginMode] = useState<'current' | 'custom'>('current');
+  const [originCoords, setOriginCoords] = useState<SimpleCoords | null>(null);
+  const [originSummary, setOriginSummary] = useState('');
+  const [cityStrategy, setCityStrategy] = useState<CityStrategy>(resolveCityStrategy(''));
+
   const [addressQuery, setAddressQuery] = useState('');
   const [suggestions, setSuggestions] = useState<AddressSuggestion[]>([]);
   const [selectedSuggestion, setSelectedSuggestion] = useState<AddressSuggestion | null>(null);
   const [isSearchingSuggestions, setIsSearchingSuggestions] = useState(false);
+  const [history, setHistory] = useState<QueryHistoryItem[]>([]);
 
   const [settingsVisible, setSettingsVisible] = useState(false);
+  const [detailVisible, setDetailVisible] = useState(false);
+  const [selectedHub, setSelectedHub] = useState<HubResult | null>(null);
+  const [isCompareLoading, setIsCompareLoading] = useState(false);
+  const [compareResults, setCompareResults] = useState<CompareSlotResult[]>([]);
+
   const [preferredActiveMode, setPreferredActiveMode] = useState<'walking' | 'cycling'>('walking');
   const [usePlannedDeparture, setUsePlannedDeparture] = useState(false);
   const [plannedDate, setPlannedDate] = useState(new Date());
@@ -175,6 +255,10 @@ export default function App() {
   }, [plannedDate, plannedHour, plannedMinute]);
 
   useEffect(() => {
+    loadQueryHistory().then(setHistory).catch(() => setHistory([]));
+  }, []);
+
+  useEffect(() => {
     if (!hasAmapKey || originMode !== 'custom') {
       setSuggestions([]);
       return;
@@ -190,11 +274,9 @@ export default function App() {
     const timer = setTimeout(async () => {
       try {
         setIsSearchingSuggestions(true);
-        const list = await fetchAddressSuggestions({
-          key: amapKey,
-          keyword,
-          limit: 8,
-        });
+        const cityHint =
+          cityStrategy.cityName && cityStrategy.cityName !== '未知城市' ? cityStrategy.cityName : undefined;
+        const list = await fetchAddressSuggestions({ key: amapKey, keyword, limit: 8, city: cityHint });
         if (!cancelled) {
           setSuggestions(list);
         }
@@ -207,13 +289,13 @@ export default function App() {
           setIsSearchingSuggestions(false);
         }
       }
-    }, 400);
+    }, 350);
 
     return () => {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [addressQuery, amapKey, hasAmapKey, originMode]);
+  }, [addressQuery, amapKey, hasAmapKey, originMode, cityStrategy.cityName]);
 
   const resolveCurrentLocation = async (): Promise<SimpleCoords> => {
     const servicesEnabled = await Location.hasServicesEnabledAsync();
@@ -234,16 +316,10 @@ export default function App() {
         }),
         12000,
       );
-      return {
-        latitude: current.coords.latitude,
-        longitude: current.coords.longitude,
-      };
+      return { latitude: current.coords.latitude, longitude: current.coords.longitude };
     } catch (error) {
       if (lastKnown) {
-        return {
-          latitude: lastKnown.coords.latitude,
-          longitude: lastKnown.coords.longitude,
-        };
+        return { latitude: lastKnown.coords.latitude, longitude: lastKnown.coords.longitude };
       }
       const message = error instanceof Error ? error.message : '无法获取当前位置';
       throw new Error(message);
@@ -257,10 +333,73 @@ export default function App() {
     if (!selectedSuggestion) {
       throw new Error('请先从候选列表中选择一个指定地点');
     }
-    return {
-      latitude: selectedSuggestion.latitude,
-      longitude: selectedSuggestion.longitude,
+    return { latitude: selectedSuggestion.latitude, longitude: selectedSuggestion.longitude };
+  };
+
+  const rememberOrigin = async (origin: SimpleCoords, cityName: string) => {
+    const title = originMode === 'current' ? '当前位置' : selectedSuggestion?.name ?? '指定地点';
+    const subtitle = originMode === 'current' ? cityName || '当前城市' : selectedSuggestion?.address ?? cityName;
+
+    const item: QueryHistoryItem = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      title,
+      subtitle: subtitle || '未知地址',
+      latitude: origin.latitude,
+      longitude: origin.longitude,
+      createdAt: new Date().toISOString(),
     };
+
+    await saveQueryHistoryItem(item);
+    const list = await loadQueryHistory();
+    setHistory(list);
+  };
+
+  const applyOriginFromHistory = (item: QueryHistoryItem) => {
+    setOriginMode('custom');
+    const suggestion: AddressSuggestion = {
+      id: item.id,
+      name: item.title,
+      address: item.subtitle,
+      latitude: item.latitude,
+      longitude: item.longitude,
+    };
+    setSelectedSuggestion(suggestion);
+    setAddressQuery(`${item.title} ${item.subtitle}`);
+    setSuggestions([]);
+  };
+
+  const runCompareForHub = async (hub: HubResult) => {
+    if (!originCoords) {
+      setCompareResults([]);
+      return;
+    }
+    setIsCompareLoading(true);
+    try {
+      const slots = buildCompareSlots();
+      const result: CompareSlotResult[] = [];
+      for (const slot of slots) {
+        const commute = await fetchCommuteInfo({
+          key: amapKey,
+          originLat: originCoords.latitude,
+          originLng: originCoords.longitude,
+          destLat: hub.latitude,
+          destLng: hub.longitude,
+          preferredActiveMode,
+          departureTime: slot.departure,
+        });
+        result.push({
+          label: slot.label,
+          activeMinutes: commute.activeMinutes,
+          transitMinutes: commute.transitMinutes,
+          drivingMinutes: commute.drivingMinutes,
+        });
+      }
+      setCompareResults(result);
+    } catch {
+      setCompareResults([]);
+    } finally {
+      setIsCompareLoading(false);
+    }
   };
 
   const requestSearch = async () => {
@@ -268,7 +407,6 @@ export default function App() {
     setStatusText('准备查询中...');
 
     try {
-      let origin: SimpleCoords;
       if (originMode === 'current') {
         setStatusText('请求定位权限中...');
         const { status } = await Location.requestForegroundPermissionsAsync();
@@ -279,7 +417,8 @@ export default function App() {
       }
 
       setStatusText(originMode === 'current' ? '正在获取当前位置...' : '正在读取指定地点...');
-      origin = await resolveOrigin();
+      const origin = await resolveOrigin();
+      setOriginCoords(origin);
 
       if (!hasAmapKey) {
         setStatusText('未检测到 EXPO_PUBLIC_AMAP_WEB_KEY');
@@ -287,28 +426,28 @@ export default function App() {
         return;
       }
 
+      const regeo = await reverseGeocode({ key: amapKey, latitude: origin.latitude, longitude: origin.longitude });
+      const cityName = regeo?.city || regeo?.district || '';
+      const strategy = resolveCityStrategy(cityName);
+      setCityStrategy(strategy);
+      setOriginSummary(regeo?.formattedAddress ?? cityName);
+      await rememberOrigin(origin, cityName);
+
       setStatusText('正在查询附近交通枢纽...');
-      const nearestHubs = await fetchNearestHubs({
-        key: amapKey,
-        latitude: origin.latitude,
-        longitude: origin.longitude,
-      });
-      const sorted = nearestHubs.sort((a, b) => (a.distanceMeters ?? 999999) - (b.distanceMeters ?? 999999));
-
-      setHubs(sorted);
-      setCommuteByKind({});
-      setExpandedKind(null);
-
-      if (sorted.length === 0) {
-        setStatusText('查询完成：50km 范围内未找到地铁站/火车站/机场，请检查定位、城市与 Key 权限');
+      const nearestHubs = await fetchNearestHubs({ key: amapKey, latitude: origin.latitude, longitude: origin.longitude });
+      if (!nearestHubs.length) {
+        setHubs([]);
+        setCommuteByKind({});
+        setScoreByKind({});
+        setStatusText('查询完成：50km 范围内未找到地铁站/火车站/机场。');
         return;
       }
 
-      setStatusText('正在计算步行/骑行/公交/开车时间...');
-      const nextCommuteByKind: Record<string, CommuteInfo> = {};
-      for (const hub of sorted) {
+      setStatusText('正在计算路线、评分与建议...');
+      const commuteMap: Record<string, CommuteInfo> = {};
+      for (const hub of nearestHubs) {
         try {
-          const commute = await fetchCommuteInfo({
+          commuteMap[hub.kind] = await fetchCommuteInfo({
             key: amapKey,
             originLat: origin.latitude,
             originLng: origin.longitude,
@@ -317,25 +456,28 @@ export default function App() {
             preferredActiveMode,
             departureTime: usePlannedDeparture ? formatDateTimeForApi(plannedDepartureAt) : null,
           });
-          nextCommuteByKind[hub.kind] = commute;
-          setCommuteByKind({ ...nextCommuteByKind });
         } catch (commuteError) {
           if (commuteError instanceof AmapApiError && commuteError.code === '10021') {
             throw commuteError;
           }
-          nextCommuteByKind[hub.kind] = {
-            activeMode: null,
-            activeMinutes: null,
-            walkingMinutes: null,
-            cyclingMinutes: null,
-            transitMinutes: null,
-            drivingMinutes: null,
-            transitSteps: [],
-          };
+          commuteMap[hub.kind] = buildFallbackCommute();
         }
       }
 
-      setStatusText(`查询完成，共 ${sorted.length} 个枢纽类型有结果`);
+      const scoreMap: Record<string, number> = {};
+      nearestHubs.forEach((hub) => {
+        scoreMap[hub.kind] = scoreHub(hub, commuteMap[hub.kind], strategy);
+      });
+      const sorted = [...nearestHubs].sort((a, b) => scoreMap[a.kind] - scoreMap[b.kind]);
+
+      setHubs(sorted);
+      setCommuteByKind(commuteMap);
+      setScoreByKind(scoreMap);
+      setExpandedKind(null);
+      setSelectedHub(null);
+      setDetailVisible(false);
+      setSmartHint(buildSmartHint({ hubs: sorted, commuteByKind: commuteMap }));
+      setStatusText(`查询完成，已按综合通达度排序（城市策略：${strategy.cityName}）`);
     } catch (error) {
       let message = error instanceof Error ? error.message : '未知错误';
       if (error instanceof AmapApiError && error.code === '10021') {
@@ -355,9 +497,31 @@ export default function App() {
     setPlannedDate(selectedDate);
   };
 
+  const openDetail = (hub: HubResult) => {
+    setSelectedHub(hub);
+    setDetailVisible(true);
+    runCompareForHub(hub);
+  };
+
   const keyHint = hasAmapKey
     ? '高德 Key 已读取'
     : '请在 .env 中设置 EXPO_PUBLIC_AMAP_WEB_KEY 并重启 Expo';
+
+  const selectedCommute = selectedHub ? commuteByKind[selectedHub.kind] : null;
+
+  const mapPreviewUrl = useMemo(() => {
+    if (!selectedHub || !originCoords || !hasAmapKey) {
+      return '';
+    }
+    const url = new URL('https://restapi.amap.com/v3/staticmap');
+    url.search = new URLSearchParams({
+      key: amapKey,
+      size: '700*360',
+      zoom: '11',
+      markers: `mid,0x25A7FF,S:${originCoords.longitude},${originCoords.latitude}|mid,0xFF5A5F,D:${selectedHub.longitude},${selectedHub.latitude}`,
+    }).toString();
+    return url.toString();
+  }, [amapKey, hasAmapKey, originCoords, selectedHub]);
 
   return (
     <>
@@ -376,6 +540,10 @@ export default function App() {
             出行偏好: {preferredActiveMode === 'walking' ? '步行优先' : '骑行优先'} | 出发时间:{' '}
             {usePlannedDeparture ? formatDateTimeForDisplay(plannedDepartureAt) : '现在'}
           </Text>
+          <Text className="mt-1 text-xs text-slate-500">
+            城市策略: {cityStrategy.cityName}（公交权重 {Math.round(cityStrategy.transitWeight * 100)}%）
+          </Text>
+          {originSummary ? <Text className="mt-1 text-xs text-slate-500">起点地址: {originSummary}</Text> : null}
         </View>
 
         <View className="mb-4 rounded-xl bg-white p-4">
@@ -407,9 +575,27 @@ export default function App() {
                 placeholderTextColor="#64748b"
                 className="rounded-lg border border-slate-300 px-3 py-2 text-slate-900"
               />
-              {isSearchingSuggestions ? (
-                <Text className="mt-2 text-xs text-slate-500">正在搜索候选地点...</Text>
+              {isSearchingSuggestions ? <Text className="mt-2 text-xs text-slate-500">正在搜索候选地点...</Text> : null}
+
+              {history.length > 0 ? (
+                <View className="mt-3">
+                  <Text className="mb-1 text-xs text-slate-500">最近使用</Text>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                    <View className="flex-row gap-2">
+                      {history.slice(0, 5).map((item) => (
+                        <Pressable
+                          key={item.id}
+                          onPress={() => applyOriginFromHistory(item)}
+                          className="rounded-full bg-slate-200 px-3 py-1.5"
+                        >
+                          <Text className="text-xs text-slate-700">{item.title}</Text>
+                        </Pressable>
+                      ))}
+                    </View>
+                  </ScrollView>
+                </View>
               ) : null}
+
               {suggestions.length > 0 ? (
                 <View className="mt-2 rounded-lg border border-slate-200 bg-slate-50">
                   {suggestions.map((item) => (
@@ -428,10 +614,9 @@ export default function App() {
                   ))}
                 </View>
               ) : null}
+
               <Text className="mt-2 text-xs text-slate-500">
-                {selectedSuggestion
-                  ? `已选择: ${selectedSuggestion.name}`
-                  : '请从候选列表点选，确保经纬度精确'}
+                {selectedSuggestion ? `已选择: ${selectedSuggestion.name}` : '请从候选列表点选，确保经纬度精确'}
               </Text>
             </>
           ) : null}
@@ -442,9 +627,7 @@ export default function App() {
           disabled={isLoading}
           className={`rounded-xl px-5 py-3 ${isLoading ? 'bg-blue-400' : 'bg-blue-600 active:bg-blue-700'}`}
         >
-          <Text className="text-center text-base font-semibold text-white">
-            {isLoading ? '处理中...' : '开始查询'}
-          </Text>
+          <Text className="text-center text-base font-semibold text-white">{isLoading ? '处理中...' : '开始查询'}</Text>
         </Pressable>
 
         {isLoading ? (
@@ -455,6 +638,9 @@ export default function App() {
         ) : null}
 
         <Text className="mt-5 text-sm text-slate-700">{statusText}</Text>
+        <View className="mt-3 rounded-lg bg-amber-50 p-3">
+          <Text className="text-sm text-amber-900">{smartHint}</Text>
+        </View>
 
         <View className="mt-6 gap-3">
           {hubs.map((hub) => (
@@ -470,6 +656,9 @@ export default function App() {
                   <Text className="mt-1 text-sm text-slate-600">{hub.address}</Text>
                   <Text className="mt-1 text-sm text-slate-700">
                     距离: {hub.distanceMeters == null ? '未知' : `${(hub.distanceMeters / 1000).toFixed(1)} km`}
+                  </Text>
+                  <Text className="mt-1 text-sm text-emerald-700">
+                    通达度分数: {scoreByKind[hub.kind] ? scoreByKind[hub.kind].toFixed(1) : '--'}
                   </Text>
                 </View>
                 <View className="items-end">
@@ -492,9 +681,14 @@ export default function App() {
 
               {expandedKind === hub.kind ? (
                 <View className="mt-3 rounded-lg bg-slate-50 p-3">
-                  <Text className="mb-2 text-sm font-semibold text-slate-800">公交换乘方式</Text>
+                  <View className="mb-2 flex-row items-center justify-between">
+                    <Text className="text-sm font-semibold text-slate-800">公交换乘方式</Text>
+                    <Pressable onPress={() => openDetail(hub)} className="rounded-md bg-blue-600 px-3 py-1.5">
+                      <Text className="text-xs text-white">查看详情</Text>
+                    </Pressable>
+                  </View>
                   {commuteByKind[hub.kind]?.transitSteps?.length ? (
-                    commuteByKind[hub.kind].transitSteps.map((step, index) => (
+                    commuteByKind[hub.kind].transitSteps.slice(0, 4).map((step, index) => (
                       <Text key={`${hub.kind}-${index}`} className="mb-1 text-sm text-slate-700">
                         {index + 1}. {step}
                       </Text>
@@ -508,6 +702,75 @@ export default function App() {
           ))}
         </View>
       </ScrollView>
+
+      <Modal visible={detailVisible} animationType="slide">
+        <View className="flex-1 bg-slate-100 px-5 py-12">
+          <View className="mb-3 flex-row items-center justify-between">
+            <Text className="text-xl font-semibold text-slate-900">枢纽详情</Text>
+            <Pressable onPress={() => setDetailVisible(false)}>
+              <Text className="text-slate-600">关闭</Text>
+            </Pressable>
+          </View>
+
+          {selectedHub ? (
+            <ScrollView>
+              <Text className="text-lg font-semibold text-slate-900">{selectedHub.name}</Text>
+              <Text className="mt-1 text-sm text-slate-600">{selectedHub.address}</Text>
+
+              {mapPreviewUrl ? (
+                <Image source={{ uri: mapPreviewUrl }} className="mt-3 h-44 w-full rounded-xl" resizeMode="cover" />
+              ) : null}
+
+              <View className="mt-3 rounded-xl bg-white p-4">
+                <Text className="text-sm text-slate-700">
+                  主动出行: {formatMinutes(selectedCommute?.activeMinutes ?? null)}
+                </Text>
+                <Text className="mt-1 text-sm text-slate-700">
+                  公交: {formatMinutes(selectedCommute?.transitMinutes ?? null)} | 换乘 {selectedCommute?.transitTransferCount ?? '--'} 次 | 预计到达 {selectedCommute?.transitArrivalTime ?? '--'}
+                </Text>
+                <Text className="mt-1 text-sm text-slate-700">
+                  开车: {formatMinutes(selectedCommute?.drivingMinutes ?? null)} | 预计到达 {selectedCommute?.drivingArrivalTime ?? '--'}
+                </Text>
+              </View>
+
+              <View className="mt-3 rounded-xl bg-white p-4">
+                <Text className="mb-2 text-sm font-semibold text-slate-800">多时段对比</Text>
+                <Text className="mb-2 text-xs text-slate-500">说明：三种方式均按所选时段重算。</Text>
+                {isCompareLoading ? (
+                  <View className="flex-row items-center">
+                    <ActivityIndicator />
+                    <Text className="ml-2 text-sm text-slate-600">计算中...</Text>
+                  </View>
+                ) : compareResults.length > 0 ? (
+                  compareResults.map((row) => (
+                    <View key={row.label} className="mb-2 rounded-lg bg-slate-50 p-2">
+                      <Text className="text-xs text-slate-500">{row.label}</Text>
+                      <Text className="text-sm text-slate-800">
+                        主动出行 {formatMinutes(row.activeMinutes)} | 公交 {formatMinutes(row.transitMinutes)} | 开车 {formatMinutes(row.drivingMinutes)}
+                      </Text>
+                    </View>
+                  ))
+                ) : (
+                  <Text className="text-sm text-slate-600">暂无对比数据</Text>
+                )}
+              </View>
+
+              <View className="mt-3 rounded-xl bg-white p-4">
+                <Text className="mb-2 text-sm font-semibold text-slate-800">完整公交换乘步骤</Text>
+                {selectedCommute?.transitSteps?.length ? (
+                  selectedCommute.transitSteps.map((step, index) => (
+                    <Text key={`detail-${selectedHub.kind}-${index}`} className="mb-1 text-sm text-slate-700">
+                      {index + 1}. {step}
+                    </Text>
+                  ))
+                ) : (
+                  <Text className="text-sm text-slate-600">暂无换乘明细</Text>
+                )}
+              </View>
+            </ScrollView>
+          ) : null}
+        </View>
+      </Modal>
 
       <Modal visible={settingsVisible} animationType="slide" transparent>
         <View className="flex-1 justify-end bg-black/40">
@@ -549,10 +812,7 @@ export default function App() {
 
             {usePlannedDeparture ? (
               <>
-                <Pressable
-                  onPress={() => setShowDatePicker(true)}
-                  className="mb-3 rounded-lg bg-slate-200 px-3 py-2"
-                >
+                <Pressable onPress={() => setShowDatePicker(true)} className="mb-3 rounded-lg bg-slate-200 px-3 py-2">
                   <Text className="text-slate-800">选择日期: {formatDateForDisplay(plannedDate)}</Text>
                 </Pressable>
 
@@ -562,23 +822,20 @@ export default function App() {
                   <Text className="text-xl text-slate-700">:</Text>
                   <CyclicNumberWheel value={plannedMinute} maxExclusive={60} onChange={setPlannedMinute} />
                 </View>
-                <Text className="text-xs text-slate-500">
-                  当前选择: {formatDateTimeForDisplay(plannedDepartureAt)}
-                </Text>
+                <Text className="text-xs text-slate-500">当前选择: {formatDateTimeForDisplay(plannedDepartureAt)}</Text>
+                <Pressable
+                  onPress={() => setSettingsVisible(false)}
+                  className="mt-3 rounded-lg bg-blue-600 px-3 py-2"
+                >
+                  <Text className="text-center text-sm font-semibold text-white">完成</Text>
+                </Pressable>
               </>
             ) : null}
           </View>
         </View>
       </Modal>
 
-      {showDatePicker ? (
-        <DateTimePicker
-          value={plannedDate}
-          mode="date"
-          display="default"
-          onChange={onDateChange}
-        />
-      ) : null}
+      {showDatePicker ? <DateTimePicker value={plannedDate} mode="date" display="default" onChange={onDateChange} /> : null}
     </>
   );
 }
