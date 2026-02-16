@@ -1,0 +1,74 @@
+name: Android APK Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (example: v1.0.1)'
+        required: true
+        default: 'v1.0.1'
+      release_name:
+        description: 'GitHub release title'
+        required: true
+        default: 'HubRadar Android APK'
+      release_notes:
+        description: 'Release notes'
+        required: false
+        default: 'Auto build from GitHub Actions'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    env:
+      EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+      EXPO_PUBLIC_AMAP_WEB_KEY: ${{ secrets.EXPO_PUBLIC_AMAP_WEB_KEY }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install EAS CLI
+        run: npm i -g eas-cli
+
+      - name: Validate Expo token
+        run: |
+          if [ -z "$EXPO_TOKEN" ]; then
+            echo "Missing EXPO_TOKEN secret"
+            exit 1
+          fi
+
+      - name: Build APK on EAS
+        run: |
+          eas build --platform android --profile preview --non-interactive --wait --json > eas-build.json
+          cat eas-build.json
+
+      - name: Download APK artifact
+        run: |
+          APK_URL=$(jq -r 'if type=="array" then .[0].artifacts.buildUrl // .[0].artifacts.applicationArchiveUrl // empty else .artifacts.buildUrl // .artifacts.applicationArchiveUrl // empty end' eas-build.json)
+          if [ -z "$APK_URL" ] || [ "$APK_URL" = "null" ]; then
+            echo "Cannot find APK download URL in eas-build.json"
+            exit 1
+          fi
+          echo "APK_URL=$APK_URL"
+          curl -L "$APK_URL" -o "HubRadar-${{ inputs.tag }}.apk"
+          ls -lh "HubRadar-${{ inputs.tag }}.apk"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          name: ${{ inputs.release_name }}
+          body: ${{ inputs.release_notes }}
+          files: HubRadar-${{ inputs.tag }}.apk
