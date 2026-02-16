@@ -50,10 +50,6 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Disable New Architecture for CI build
-        run: |
-          node -e "const fs=require('fs');const p='app.json';const j=JSON.parse(fs.readFileSync(p,'utf8'));if(j.expo){j.expo.newArchEnabled=false;}fs.writeFileSync(p,JSON.stringify(j,null,2)+'\\n');"
-
       - name: Generate Android project
         run: npx expo prebuild -p android --non-interactive
 
