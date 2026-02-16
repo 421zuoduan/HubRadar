@@ -1,0 +1,76 @@
+name: Android APK Local Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (example: v1.1.0)'
+        required: true
+        default: 'v1.1.0'
+      release_name:
+        description: 'GitHub release title'
+        required: true
+        default: 'HubRadar Android APK (Local Build)'
+      release_notes:
+        description: 'Release notes'
+        required: false
+        default: 'Built by GitHub Actions local Android build'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        run: |
+          yes | sdkmanager --licenses
+          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Disable New Architecture for CI build
+        run: |
+          node -e "const fs=require('fs');const p='app.json';const j=JSON.parse(fs.readFileSync(p,'utf8'));if(j.expo){j.expo.newArchEnabled=false;}fs.writeFileSync(p,JSON.stringify(j,null,2)+'\\n');"
+
+      - name: Generate Android project
+        run: npx expo prebuild -p android --non-interactive
+
+      - name: Build APK (debug)
+        run: |
+          cd android
+          ./gradlew assembleDebug
+
+      - name: Rename APK
+        run: |
+          cp android/app/build/outputs/apk/debug/app-debug.apk "HubRadar-${{ inputs.tag }}.apk"
+          ls -lh "HubRadar-${{ inputs.tag }}.apk"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          name: ${{ inputs.release_name }}
+          body: ${{ inputs.release_notes }}
+          files: HubRadar-${{ inputs.tag }}.apk
