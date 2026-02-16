@@ -49,6 +49,10 @@ jobs:
             exit 1
           fi
 
+      - name: Init EAS project
+        run: |
+          eas init --non-interactive --force
+
       - name: Build APK on EAS
         run: |
           eas build --platform android --profile preview --non-interactive --wait --json > eas-build.json
