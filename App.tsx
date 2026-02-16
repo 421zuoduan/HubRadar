@@ -230,6 +230,7 @@ export default function App() {
   const [suggestions, setSuggestions] = useState<AddressSuggestion[]>([]);
   const [selectedSuggestion, setSelectedSuggestion] = useState<AddressSuggestion | null>(null);
   const [isSearchingSuggestions, setIsSearchingSuggestions] = useState(false);
+  const [suggestionHint, setSuggestionHint] = useState('');
   const [history, setHistory] = useState<QueryHistoryItem[]>([]);
 
   const [settingsVisible, setSettingsVisible] = useState(false);
@@ -261,12 +262,14 @@ export default function App() {
   useEffect(() => {
     if (!hasAmapKey || originMode !== 'custom') {
       setSuggestions([]);
+      setSuggestionHint('');
       return;
     }
 
     const keyword = addressQuery.trim();
     if (keyword.length < 2) {
       setSuggestions([]);
+      setSuggestionHint('');
       return;
     }
 
@@ -279,10 +282,13 @@ export default function App() {
         const list = await fetchAddressSuggestions({ key: amapKey, keyword, limit: 8, city: cityHint });
         if (!cancelled) {
           setSuggestions(list);
+          setSuggestionHint(list.length ? '' : '暂无候选，请补充关键词后重试');
         }
-      } catch {
+      } catch (error) {
         if (!cancelled) {
           setSuggestions([]);
+          const message = error instanceof Error ? error.message : '候选查询失败，请稍后重试';
+          setSuggestionHint(message);
         }
       } finally {
         if (!cancelled) {
@@ -570,6 +576,7 @@ export default function App() {
                 onChangeText={(text) => {
                   setAddressQuery(text);
                   setSelectedSuggestion(null);
+                  setSuggestionHint('');
                 }}
                 placeholder="输入地址关键词（如：上海虹桥站）"
                 placeholderTextColor="#64748b"
@@ -613,6 +620,9 @@ export default function App() {
                     </Pressable>
                   ))}
                 </View>
+              ) : null}
+              {!isSearchingSuggestions && addressQuery.trim().length >= 2 && suggestions.length === 0 && suggestionHint ? (
+                <Text className="mt-2 text-xs text-amber-700">{suggestionHint}</Text>
               ) : null}
 
               <Text className="mt-2 text-xs text-slate-500">
