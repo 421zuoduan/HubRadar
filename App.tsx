@@ -32,6 +32,7 @@ import {
   scoreHub,
   type CityStrategy,
 } from './src/features/insight/services/scoring';
+import { clearAmapWebKey, loadAmapWebKey, saveAmapWebKey } from './src/features/config/services/amapKey';
 
 type SimpleCoords = {
   latitude: number;
@@ -238,6 +239,9 @@ export default function App() {
   const [selectedHub, setSelectedHub] = useState<HubResult | null>(null);
   const [isCompareLoading, setIsCompareLoading] = useState(false);
   const [compareResults, setCompareResults] = useState<CompareSlotResult[]>([]);
+  const [amapKey, setAmapKey] = useState('');
+  const [keyInput, setKeyInput] = useState('');
+  const [keyHintText, setKeyHintText] = useState('');
 
   const [preferredActiveMode, setPreferredActiveMode] = useState<'walking' | 'cycling'>('walking');
   const [usePlannedDeparture, setUsePlannedDeparture] = useState(false);
@@ -246,7 +250,6 @@ export default function App() {
   const [plannedMinute, setPlannedMinute] = useState(new Date().getMinutes());
   const [showDatePicker, setShowDatePicker] = useState(false);
 
-  const amapKey = process.env.EXPO_PUBLIC_AMAP_WEB_KEY ?? '';
   const hasAmapKey = amapKey.trim().length > 0;
 
   const plannedDepartureAt = useMemo(() => {
@@ -257,6 +260,28 @@ export default function App() {
 
   useEffect(() => {
     loadQueryHistory().then(setHistory).catch(() => setHistory([]));
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    loadAmapWebKey()
+      .then((savedKey) => {
+        if (cancelled) {
+          return;
+        }
+        setAmapKey(savedKey);
+        setKeyInput(savedKey);
+      })
+      .catch(() => {
+        if (cancelled) {
+          return;
+        }
+        setAmapKey('');
+        setKeyInput('');
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -427,7 +452,7 @@ export default function App() {
       setOriginCoords(origin);
 
       if (!hasAmapKey) {
-        setStatusText('未检测到 EXPO_PUBLIC_AMAP_WEB_KEY');
+        setStatusText('未配置高德 Key，请先到设置页保存 Key');
         setHubs([]);
         return;
       }
@@ -503,6 +528,27 @@ export default function App() {
     setPlannedDate(selectedDate);
   };
 
+  const onSaveKey = async () => {
+    const trimmed = keyInput.trim();
+    if (!trimmed) {
+      setKeyHintText('请输入有效的高德 Web Key');
+      return;
+    }
+    await saveAmapWebKey(trimmed);
+    setAmapKey(trimmed);
+    setKeyInput(trimmed);
+    setKeyHintText('Key 已保存，后续查询将使用此 Key');
+  };
+
+  const onClearKey = async () => {
+    await clearAmapWebKey();
+    setAmapKey('');
+    setKeyInput('');
+    setKeyHintText('已清除本地 Key');
+    setSuggestions([]);
+    setSelectedSuggestion(null);
+  };
+
   const openDetail = (hub: HubResult) => {
     setSelectedHub(hub);
     setDetailVisible(true);
@@ -510,8 +556,8 @@ export default function App() {
   };
 
   const keyHint = hasAmapKey
-    ? '高德 Key 已读取'
-    : '请在 .env 中设置 EXPO_PUBLIC_AMAP_WEB_KEY 并重启 Expo';
+    ? '高德 Key 已配置（来自 App 本地设置）'
+    : '未配置高德 Key，请在“设置”中输入并保存';
 
   const selectedCommute = selectedHub ? commuteByKind[selectedHub.kind] : null;
 
@@ -791,6 +837,29 @@ export default function App() {
                 <Text className="text-slate-600">关闭</Text>
               </Pressable>
             </View>
+
+            <Text className="mb-2 text-sm font-semibold text-slate-800">高德 Key（本地）</Text>
+            <TextInput
+              value={keyInput}
+              onChangeText={(text) => {
+                setKeyInput(text);
+                setKeyHintText('');
+              }}
+              autoCapitalize="none"
+              autoCorrect={false}
+              placeholder="输入你自己的高德 Web Key"
+              placeholderTextColor="#64748b"
+              className="rounded-lg border border-slate-300 px-3 py-2 text-slate-900"
+            />
+            <View className="mb-4 mt-2 flex-row gap-2">
+              <Pressable onPress={onSaveKey} className="rounded-lg bg-blue-600 px-3 py-2">
+                <Text className="text-white">保存 Key</Text>
+              </Pressable>
+              <Pressable onPress={onClearKey} className="rounded-lg bg-slate-200 px-3 py-2">
+                <Text className="text-slate-700">清除 Key</Text>
+              </Pressable>
+            </View>
+            {keyHintText ? <Text className="mb-3 text-xs text-slate-600">{keyHintText}</Text> : null}
 
             <Text className="mb-2 text-sm font-semibold text-slate-800">主动出行偏好</Text>
             <View className="mb-4 flex-row gap-2">
