@@ -14,7 +14,7 @@ import {
 } from 'react-native';
 import DateTimePicker, { type DateTimePickerEvent } from '@react-native-community/datetimepicker';
 import * as Location from 'expo-location';
-import { AmapApiError, fetchNearestHubs, type HubResult } from './src/features/hub-search/services/amap';
+import { AmapApiError, fetchNearestHubs, type HubKind, type HubResult } from './src/features/hub-search/services/amap';
 import { fetchCommuteInfo, type CommuteInfo } from './src/features/commute/services/amapDirection';
 import {
   fetchAddressSuggestions,
@@ -213,6 +213,8 @@ function CyclicNumberWheel(props: {
   );
 }
 
+const isRailHub = (kind: HubKind): boolean => kind === 'train' || kind === 'highspeed';
+
 export default function App() {
   const [statusText, setStatusText] = useState('等待定位与查询');
   const [hubs, setHubs] = useState<HubResult[]>([]);
@@ -297,6 +299,15 @@ export default function App() {
       setSuggestionHint('');
       return;
     }
+    if (selectedSuggestion) {
+      const selectedText = `${selectedSuggestion.name} ${selectedSuggestion.address}`.trim();
+      if (keyword === selectedText) {
+        setSuggestions([]);
+        setSuggestionHint('');
+        setIsSearchingSuggestions(false);
+        return;
+      }
+    }
 
     let cancelled = false;
     const timer = setTimeout(async () => {
@@ -326,7 +337,7 @@ export default function App() {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [addressQuery, amapKey, hasAmapKey, originMode, cityStrategy.cityName]);
+  }, [addressQuery, amapKey, hasAmapKey, originMode, cityStrategy.cityName, selectedSuggestion]);
 
   const resolveCurrentLocation = async (): Promise<SimpleCoords> => {
     const servicesEnabled = await Location.hasServicesEnabledAsync();
@@ -465,12 +476,17 @@ export default function App() {
       await rememberOrigin(origin, cityName);
 
       setStatusText('正在查询附近交通枢纽...');
-      const nearestHubs = await fetchNearestHubs({ key: amapKey, latitude: origin.latitude, longitude: origin.longitude });
+      const nearestHubs = await fetchNearestHubs({
+        key: amapKey,
+        latitude: origin.latitude,
+        longitude: origin.longitude,
+        cityName,
+      });
       if (!nearestHubs.length) {
         setHubs([]);
         setCommuteByKind({});
         setScoreByKind({});
-        setStatusText('查询完成：50km 范围内未找到地铁站/火车站/机场。');
+        setStatusText('查询完成：50km 范围内未找到地铁站/火车站/高铁站/机场。');
         return;
       }
 
@@ -716,6 +732,12 @@ export default function App() {
                   <Text className="mt-1 text-sm text-emerald-700">
                     通达度分数: {scoreByKind[hub.kind] ? scoreByKind[hub.kind].toFixed(1) : '--'}
                   </Text>
+                  {isRailHub(hub.kind) && hub.trainProfile ? (
+                    <Text className="mt-1 text-xs text-indigo-700">
+                      主站识别分: {hub.trainProfile.compositeScore.toFixed(1)} | 运力 {hub.trainProfile.capacityScore}
+                      /100 | 线路估计 {hub.trainProfile.lineCountEstimate}
+                    </Text>
+                  ) : null}
                 </View>
                 <View className="items-end">
                   <Text className="text-xs text-slate-500">
@@ -752,6 +774,27 @@ export default function App() {
                   ) : (
                     <Text className="text-sm text-slate-600">暂无换乘明细</Text>
                   )}
+                  {isRailHub(hub.kind) && hub.trainProfile ? (
+                    <Text className="mt-2 text-xs text-slate-500">
+                      主站识别依据: {hub.trainProfile.reasonTags.length ? hub.trainProfile.reasonTags.join(' / ') : '通用规则'} | 高铁信号{' '}
+                      {hub.trainProfile.hasHighSpeedSignal ? '是' : '否'}
+                    </Text>
+                  ) : null}
+                  {(isRailHub(hub.kind) || hub.kind === 'airport') && hub.topCandidates?.length ? (
+                    <View className="mt-3 rounded-lg border border-slate-200 bg-white p-2">
+                      <Text className="mb-1 text-xs font-semibold text-slate-700">
+                        {isRailHub(hub.kind) ? `${hub.kindLabel} Top3 候选` : '机场 Top3 候选'}
+                      </Text>
+                      {hub.topCandidates.slice(0, 3).map((candidate, index) => (
+                        <Text key={`${hub.kind}-top-${candidate.name}-${index}`} className="mb-1 text-xs text-slate-600">
+                          {index + 1}. {candidate.name} | {(candidate.distanceMeters ?? 0) / 1000 >= 1
+                            ? `${((candidate.distanceMeters ?? 0) / 1000).toFixed(1)}km`
+                            : `${candidate.distanceMeters ?? 0}m`}
+                          {' '}| 分数 {candidate.score.toFixed(1)}
+                        </Text>
+                      ))}
+                    </View>
+                  ) : null}
                 </View>
               ) : null}
             </Pressable>

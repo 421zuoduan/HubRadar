@@ -1,6 +1,9 @@
 name: Android APK Local Release
 
 on:
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
     inputs:
       tag:
@@ -22,6 +25,10 @@ permissions:
 jobs:
   build-and-release:
     runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      RELEASE_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.release_name || format('HubRadar Android APK ({0})', github.ref_name) }}
+      RELEASE_NOTES: ${{ github.event_name == 'workflow_dispatch' && inputs.release_notes || format('Auto build from tag {0}', github.ref_name) }}
 
     steps:
       - name: Checkout
@@ -60,13 +67,13 @@ jobs:
 
       - name: Rename APK
         run: |
-          cp android/app/build/outputs/apk/release/app-release.apk "HubRadar-${{ inputs.tag }}.apk"
-          ls -lh "HubRadar-${{ inputs.tag }}.apk"
+          cp android/app/build/outputs/apk/release/app-release.apk "HubRadar-${RELEASE_TAG}.apk"
+          ls -lh "HubRadar-${RELEASE_TAG}.apk"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.tag }}
-          name: ${{ inputs.release_name }}
-          body: ${{ inputs.release_notes }}
-          files: HubRadar-${{ inputs.tag }}.apk
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: ${{ env.RELEASE_NAME }}
+          body: ${{ env.RELEASE_NOTES }}
+          files: HubRadar-${{ env.RELEASE_TAG }}.apk
