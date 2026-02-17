@@ -53,14 +53,14 @@ jobs:
       - name: Generate Android project
         run: npx expo prebuild -p android --non-interactive
 
-      - name: Build APK (debug)
+      - name: Build APK (release)
         run: |
           cd android
-          ./gradlew assembleDebug
+          ./gradlew assembleRelease
 
       - name: Rename APK
         run: |
-          cp android/app/build/outputs/apk/debug/app-debug.apk "HubRadar-${{ inputs.tag }}.apk"
+          cp android/app/build/outputs/apk/release/app-release.apk "HubRadar-${{ inputs.tag }}.apk"
           ls -lh "HubRadar-${{ inputs.tag }}.apk"
 
       - name: Create GitHub Release
